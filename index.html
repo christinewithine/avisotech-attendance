@@ -219,34 +219,10 @@
             const [makeupForm, setMakeupForm] = useState({ targetDate: getTodayString(), targetTime: '09:00', makeupType: '上班', reason: '' });
             const [empForm, setEmpForm] = useState({ id: '', name: '', role: '申請者', lineId: '', annualLeaveQuota: '0', avatarColor: 'bg-indigo-500', isEdit: false });
 
-            useEffect(() => {
-                let isMounted = true;
-                fetchLatestData(); 
-                
-                const fallbackTimeout = setTimeout(() => {
-                    if (isMounted) setIsAuthChecking(false);
-                }, 8000);
-                
-                const initLiff = async () => {
-                    try {
-                        await liff.init({ liffId: MY_LIFF_ID });
-                        if (isMounted) {
-                            if (liff.isLoggedIn()) {
-                                const profile = await liff.getProfile();
-                                setLineProfile(profile);
-                            } else {
-                                setIsAuthChecking(false);
-                            }
-                        }
-                    } catch (err) {
-                        console.error("LIFF 初始化失敗:", err);
-                        if (isMounted) setIsAuthChecking(false);
-                    }
-                };
-                initLiff();
-                
-                return () => { isMounted = false; clearTimeout(fallbackTimeout); };
-            }, []);
+            // 新增：日曆與檢視模式的 State
+            const [viewMode, setViewMode] = useState('list'); 
+            const [currentMonth, setCurrentMonth] = useState(new Date());
+            const [calendarUserFilter, setCalendarUserFilter] = useState('all');
 
             useEffect(() => {
                 if (lineProfile && employees.length > 0) {
@@ -407,6 +383,14 @@
                 });
             };
 
+            // 新增：處理代理人同意/拒絕的操作
+            const handleDeputyAction = async (requestId, isAgreed) => {
+                const status = isAgreed ? 'agreed' : 'rejected';
+                setLeaveRequests(prev => prev.map(req => req.requestId === requestId ? { ...req, deputyStatus: status } : req));
+                showAlert('已回覆', `您已${isAgreed ? '同意' : '拒絕'}代理`, isAgreed ? 'success' : 'alert');
+                await callApi("updateRequestStatus", { requestId, deputyStatus: status });
+            };
+
             const handleSaveEmployee = async (e) => {
                 e.preventDefault();
                 const newEmployee = { id: empForm.id, name: empForm.name, role: empForm.role, lineId: empForm.lineId, avatarColor: empForm.avatarColor || 'bg-indigo-500', annualLeaveQuota: parseFloat(empForm.annualLeaveQuota) || 0 };
@@ -463,6 +447,81 @@
                     </div>
                 );
             }
+
+            // 新增：日曆渲染邏輯
+            const renderCalendar = () => {
+                const year = currentMonth.getFullYear();
+                const month = currentMonth.getMonth();
+                const daysInMonth = new Date(year, month + 1, 0).getDate();
+                const firstDay = new Date(year, month, 1).getDay();
+                const days = [];
+
+                let calRequests = visibleRequests;
+                let calAttendance = attendanceRecords;
+
+                if (isManagementRole(currentUser.role) && calendarUserFilter !== 'all') {
+                    calRequests = calRequests.filter(r => r.applicantId === calendarUserFilter);
+                    calAttendance = calAttendance.filter(r => r.employeeId === calendarUserFilter);
+                }
+
+                for (let i = 0; i < firstDay; i++) {
+                    days.push(<div key={`empty-${i}`} className="min-h-[80px] p-2 bg-gray-50/50 border border-gray-100"></div>);
+                }
+
+                for (let d = 1; d <= daysInMonth; d++) {
+                    const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                    const dayAtt = calAttendance.filter(a => (typeof a.date === 'string' ? a.date.substring(0,10) : '') === dateStr);
+                    const dayReq = calRequests.filter(r => {
+                        if (r.type === 'makeup') return r.targetDate === dateStr;
+                        if (r.type === 'leave') return dateStr >= r.startDate && dateStr <= r.endDate;
+                        return false;
+                    });
+
+                    days.push(
+                        <div key={d} className="min-h-[80px] p-2 bg-white border border-gray-100 flex flex-col gap-1">
+                            <div className={`text-xs font-bold ${dateStr === getTodayString() ? 'bg-emerald-500 text-white w-5 h-5 flex items-center justify-center rounded-full shadow-sm' : 'text-gray-500'}`}>{d}</div>
+                            <div className="flex-1 overflow-y-auto space-y-1 mt-1 scrollbar-hide">
+                                {dayAtt.map((att, idx) => (
+                                    <div key={`att-${idx}`} className="text-[10px] leading-tight text-emerald-700 bg-emerald-50 px-1 py-0.5 rounded border border-emerald-100 truncate shadow-sm">
+                                        {isManagementRole(currentUser.role) && calendarUserFilter === 'all' && <span className="font-bold">{employees.find(e=>e.id===att.employeeId)?.name}: </span>}
+                                        {att.checkInTime ? `入${att.checkInTime.substring(0,5)}` : ''} {att.checkOutTime ? `出${att.checkOutTime.substring(0,5)}` : ''}
+                                    </div>
+                                ))}
+                                {dayReq.map((req, idx) => (
+                                    <div key={`req-${idx}`} className={`text-[10px] leading-tight px-1 py-0.5 rounded border truncate shadow-sm ${req.status === '通過' ? 'bg-blue-50 text-blue-700 border-blue-100' : 'bg-orange-50 text-orange-700 border-orange-100'}`}>
+                                        {isManagementRole(currentUser.role) && calendarUserFilter === 'all' && <span className="font-bold">{req.applicantName}: </span>}
+                                        {req.leaveType || req.makeupType} ({req.status})
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    );
+                }
+
+                return (
+                    <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden animate-fade-in">
+                        <div className="p-3 flex justify-between items-center border-b border-gray-100 bg-gray-50">
+                            <div className="flex items-center gap-3">
+                                <button onClick={() => setCurrentMonth(new Date(year, month - 1, 1))} className="p-1.5 hover:bg-white rounded-lg shadow-sm border border-transparent hover:border-gray-200 transition-all"><ChevronLeft className="w-4 h-4 text-gray-600"/></button>
+                                <span className="font-bold text-gray-700">{year}年 {month + 1}月</span>
+                                <button onClick={() => setCurrentMonth(new Date(year, month + 1, 1))} className="p-1.5 hover:bg-white rounded-lg shadow-sm border border-transparent hover:border-gray-200 transition-all"><ChevronRight className="w-4 h-4 text-gray-600"/></button>
+                            </div>
+                            {isManagementRole(currentUser.role) && (
+                                <select className="text-xs font-bold border border-gray-200 rounded-lg p-1.5 bg-white text-gray-700 shadow-sm outline-none" value={calendarUserFilter} onChange={(e) => setCalendarUserFilter(e.target.value)}>
+                                    <option value="all">顯示所有人</option>
+                                    {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                                </select>
+                            )}
+                        </div>
+                        <div className="grid grid-cols-7 text-center text-xs font-bold text-gray-500 bg-white border-b border-gray-100">
+                            <div className="py-2 text-red-400">日</div><div className="py-2">一</div><div className="py-2">二</div><div className="py-2">三</div><div className="py-2">四</div><div className="py-2">五</div><div className="py-2 text-red-400">六</div>
+                        </div>
+                        <div className="grid grid-cols-7 auto-rows-fr">
+                            {days}
+                        </div>
+                    </div>
+                );
+            };
 
             return (
                 <div className="min-h-screen bg-gray-50 pb-20 relative">
@@ -543,8 +602,14 @@
                             <div className="lg:col-span-8">
                                 <div className="flex justify-between items-center mb-4">
                                     <h3 className="font-bold text-lg text-gray-700">
-                                        {activeTab === 'admin' ? '員工列表' : '近期紀錄'}
+                                        {activeTab === 'admin' ? '員工列表' : (viewMode === 'calendar' ? '出勤與請假日曆' : '近期紀錄')}
                                     </h3>
+                                    {activeTab !== 'admin' && (
+                                        <div className="flex bg-gray-100 p-1 rounded-lg">
+                                            <button onClick={() => setViewMode('list')} className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all flex items-center ${viewMode === 'list' ? 'bg-white shadow-sm text-emerald-600' : 'text-gray-500 hover:text-gray-700'}`}><List className="w-3.5 h-3.5 mr-1"/>列表</button>
+                                            <button onClick={() => setViewMode('calendar')} className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all flex items-center ${viewMode === 'calendar' ? 'bg-white shadow-sm text-emerald-600' : 'text-gray-500 hover:text-gray-700'}`}><CalendarIcon className="w-3.5 h-3.5 mr-1"/>日曆</button>
+                                        </div>
+                                    )}
                                 </div>
 
                                 {activeTab === 'admin' ? (
@@ -558,8 +623,13 @@
                                         ))}
                                     </div>
                                 ) : (
+                                    viewMode === 'calendar' ? renderCalendar() : (
                                     <div className="space-y-3">
-                                        {visibleRequests.length === 0 ? <div className="text-center py-10 text-gray-400 bg-white rounded-xl border border-dashed">無近期紀錄</div> : visibleRequests.map(req => (
+                                        {visibleRequests.length === 0 ? <div className="text-center py-10 text-gray-400 bg-white rounded-xl border border-dashed">無近期紀錄</div> : visibleRequests.map(req => {
+                                            const deputyEmp = req.deputyId ? employees.find(e => e.id === req.deputyId) : null;
+                                            const deputyName = deputyEmp ? deputyEmp.name : req.deputyName;
+                                            
+                                            return (
                                             <div key={req.requestId} className="bg-white p-4 rounded-xl border shadow-sm relative">
                                                 <div className="flex justify-between items-start mb-2">
                                                     <div className="flex items-center gap-2">
@@ -572,14 +642,33 @@
                                                     <div className="flex items-start"><span className="w-14 text-gray-500 text-xs font-medium shrink-0 mt-0.5">{req.type==='leave'?'假別':'補登'}</span><span className="text-gray-800 font-bold">{req.leaveType || req.makeupType}</span></div>
                                                     <div className="flex items-start"><span className="w-14 text-gray-500 text-xs font-medium shrink-0 mt-0.5">時間</span><span className="text-gray-700 text-xs">{req.type==='leave' ? `${req.startDate} ~ ${req.endDate}` : `${req.targetDate} ${req.targetTime}`}</span></div>
                                                     <div className="flex items-start"><span className="w-14 text-gray-500 text-xs font-medium shrink-0 mt-0.5">事由</span><span className="text-gray-600 break-all">{req.reason}</span></div>
+                                                    
+                                                    {req.deputyId && (
+                                                        <div className="flex items-start mt-1">
+                                                            <span className="w-14 text-gray-500 text-xs font-medium shrink-0 mt-0.5">代理人</span>
+                                                            <span className="text-xs flex items-center text-gray-700 font-bold">
+                                                                {deputyName}
+                                                                {req.deputyStatus === 'pending' && <span className="ml-2 text-[10px] text-orange-600 bg-orange-50 border border-orange-100 px-1.5 py-0.5 rounded-sm">待確認</span>}
+                                                                {req.deputyStatus === 'agreed' && <span className="ml-2 text-[10px] text-emerald-600 bg-emerald-50 border border-emerald-100 px-1.5 py-0.5 rounded-sm">已同意</span>}
+                                                                {req.deputyStatus === 'rejected' && <span className="ml-2 text-[10px] text-red-600 bg-red-50 border border-red-100 px-1.5 py-0.5 rounded-sm">已拒絕</span>}
+                                                            </span>
+                                                        </div>
+                                                    )}
                                                 </div>
-                                                <div className="flex justify-end mt-2 gap-2">
+                                                <div className="flex justify-end mt-3 gap-2">
+                                                    {req.deputyId === currentUser.id && req.deputyStatus === 'pending' && req.status === '待簽核' && (
+                                                        <div className="flex gap-2 mr-auto">
+                                                            <button onClick={() => handleDeputyAction(req.requestId, false)} className="text-xs bg-gray-50 text-gray-600 px-3 py-1.5 rounded-lg font-bold hover:bg-gray-100 border border-gray-200 transition-colors shadow-sm">拒絕代理</button>
+                                                            <button onClick={() => handleDeputyAction(req.requestId, true)} className="text-xs bg-emerald-50 text-emerald-600 px-3 py-1.5 rounded-lg font-bold hover:bg-emerald-100 border border-emerald-200 transition-colors shadow-sm">同意代理</button>
+                                                        </div>
+                                                    )}
                                                     {currentUser.id === req.applicantId && req.status === '待簽核' && <button onClick={()=>handleCancelRequest(req)} className="text-xs text-gray-400 underline hover:text-red-500">取消</button>}
                                                     {currentUser.role === '簽核者' && req.status === '待簽核' && <><button onClick={()=>handleApproval(req,false)} className="text-xs bg-red-50 text-red-600 px-2 py-1 rounded border border-red-100">不通過</button><button onClick={()=>handleApproval(req,true)} className="text-xs bg-green-50 text-green-600 px-2 py-1 rounded border border-green-100">通過</button></>}
                                                 </div>
                                             </div>
-                                        ))}
+                                        )})}
                                     </div>
+                                    )
                                 )}
                             </div>
                         </div>
